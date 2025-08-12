@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
@@ -17,7 +17,7 @@ from ..scoring.ves_scorer import VESScorer
 
 
 class VESProcessor:
-    """Main VES Processing Engine with enhanced error handling"""
+    """Enhanced VES Processing Engine with improved LEV handling"""
     
     def __init__(self, config: VESConfig):
         self.config = config
@@ -113,8 +113,60 @@ class VESProcessor:
             pass
         return None
     
-    async def process_single_cve(self, cve_id: str) -> VulnerabilityMetrics:
-        """Process a single CVE with comprehensive error handling and progress tracking"""
+    def _should_use_simplified_lev(self, published_date: datetime) -> bool:
+        """Determine if we should use simplified LEV calculation"""
+        if not published_date:
+            return True
+        
+        days_old = (datetime.now() - published_date).days
+        
+        # Use simplified LEV for CVEs older than 1 year
+        return days_old > 365
+    
+    async def _calculate_lev_with_fallback(self, cve_id: str, published_date: datetime) -> Optional[float]:
+        """Calculate LEV with fallback strategies"""
+        if not published_date:
+            logging.warning("⚠️  No publication date - skipping LEV calculation")
+            return None
+        
+        end_date = datetime.now()
+        days_old = (end_date - published_date).days
+        
+        logging.info(f"📅 CVE age: {days_old} days old")
+        
+        try:
+            if self._should_use_simplified_lev(published_date):
+                logging.info("🔄 Using simplified LEV calculation for faster results")
+                lev_score = await self.lev_calculator.calculate_simplified_lev(
+                    cve_id, published_date, end_date, sample_windows=8
+                )
+            else:
+                logging.info("📊 Using full LEV calculation")
+                # Limit lookback to 2 years for performance
+                lev_score = await self.lev_calculator.calculate_lev_score(
+                    cve_id, published_date, end_date, max_lookback_days=730
+                )
+            
+            return lev_score
+            
+        except asyncio.TimeoutError:
+            logging.warning("⏰ LEV calculation timed out, trying simplified method")
+            try:
+                # Fallback to very fast simplified calculation
+                lev_score = await self.lev_calculator.calculate_simplified_lev(
+                    cve_id, published_date, end_date, sample_windows=4
+                )
+                return lev_score
+            except Exception as e:
+                logging.warning(f"⚠️  Fallback LEV calculation also failed: {e}")
+                return None
+        
+        except Exception as e:
+            logging.warning(f"⚠️  LEV calculation failed: {e}")
+            return None
+    
+    async def process_single_cve(self, cve_id: str, skip_lev: bool = False) -> VulnerabilityMetrics:
+        """Process a single CVE with enhanced LEV handling and skip option"""
         metrics = VulnerabilityMetrics(cve_id=cve_id)
         
         try:
@@ -126,7 +178,6 @@ class VESProcessor:
             
             if not cve_data:
                 logging.warning(f"⚠️  No CVE data found for {cve_id} - continuing with limited analysis")
-                # Continue processing with other sources even if NVD fails
             else:
                 # Extract CVSS data
                 metrics.cvss_score, metrics.cvss_vector = self._extract_cvss_data(cve_data)
@@ -142,6 +193,8 @@ class VESProcessor:
             logging.info(f"📊 Step 2/4: Fetching EPSS data...")
             try:
                 metrics.epss_score, metrics.epss_percentile = await self.epss_client.get_epss_score(cve_id)
+                if metrics.epss_score:
+                    logging.info(f"✅ EPSS: {metrics.epss_score:.6f} ({metrics.epss_percentile:.2f}%)")
             except Exception as e:
                 logging.warning(f"⚠️  EPSS fetch failed: {e}")
                 metrics.epss_score, metrics.epss_percentile = None, None
@@ -156,20 +209,18 @@ class VESProcessor:
                 logging.warning(f"⚠️  KEV check failed: {e}")
                 metrics.kev_status = False
             
-            # Step 4: Calculate LEV score
-            logging.info(f"📈 Step 4/4: Calculating LEV score...")
-            try:
-                if metrics.published_date:
-                    end_date = datetime.now()
-                    metrics.lev_score = await self.lev_calculator.calculate_lev_score(
-                        cve_id, metrics.published_date, end_date
-                    )
+            # Step 4: Calculate LEV score (with skip option)
+            if skip_lev:
+                logging.info(f"⏭️  Step 4/4: Skipping LEV calculation (--skip-lev flag)")
+                metrics.lev_score = None
+            else:
+                logging.info(f"📈 Step 4/4: Calculating LEV score...")
+                metrics.lev_score = await self._calculate_lev_with_fallback(cve_id, metrics.published_date)
+                
+                if metrics.lev_score is not None:
                     logging.info(f"📈 LEV Score: {metrics.lev_score:.6f}")
                 else:
-                    logging.warning("⚠️  No publication date - skipping LEV calculation")
-            except Exception as e:
-                logging.warning(f"⚠️  LEV calculation failed: {e}")
-                metrics.lev_score = None
+                    logging.warning("⚠️  LEV calculation unavailable")
             
             # Calculate final VES score
             metrics.ves_score = self.scorer.calculate_ves_score(metrics)
@@ -183,15 +234,18 @@ class VESProcessor:
         
         return metrics
     
-    async def process_bulk_cves(self, cve_ids: List[str]) -> List[VulnerabilityMetrics]:
-        """Process multiple CVEs with progress tracking and error resilience"""
+    async def process_bulk_cves(self, cve_ids: List[str], skip_lev: bool = False) -> List[VulnerabilityMetrics]:
+        """Process multiple CVEs with LEV skip option for faster bulk processing"""
         semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
         
         async def process_with_semaphore(cve_id: str) -> VulnerabilityMetrics:
             async with semaphore:
-                return await self.process_single_cve(cve_id)
+                return await self.process_single_cve(cve_id, skip_lev=skip_lev)
         
-        logging.info(f"🚀 Starting bulk processing of {len(cve_ids)} CVEs...")
+        if skip_lev:
+            logging.info(f"🚀 Starting fast bulk processing of {len(cve_ids)} CVEs (LEV disabled)")
+        else:
+            logging.info(f"🚀 Starting bulk processing of {len(cve_ids)} CVEs...")
         
         tasks = [process_with_semaphore(cve_id) for cve_id in cve_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
