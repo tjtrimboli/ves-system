@@ -172,18 +172,22 @@ class TableFormatter:
         return priority_map.get(priority_level, "UNKNOWN")
     
     @staticmethod
-    def _get_epss_risk_level(percentile: float) -> str:
-        """Get EPSS risk level description"""
-        if percentile is None:
+    def _get_epss_risk_level(epss_score: float, percentile: float = None) -> str:
+        """Get EPSS risk level description based on score and percentile"""
+        if epss_score is None:
             return "Unknown"
-        elif percentile >= 95:
+        
+        # Primary assessment based on EPSS score (exploitation probability)
+        if epss_score >= 0.8:
             return "Very High Risk"
-        elif percentile >= 80:
+        elif epss_score >= 0.6:
             return "High Risk"
-        elif percentile >= 50:
+        elif epss_score >= 0.3:
             return "Medium Risk"
+        elif epss_score >= 0.1:
+            return "Low Risk"
         else:
-            return "Lower Risk"
+            return "Very Low Risk"
     
     @staticmethod
     def _get_lev_risk_level(lev_score: float) -> str:

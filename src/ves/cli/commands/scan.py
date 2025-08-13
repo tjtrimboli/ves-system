@@ -8,11 +8,12 @@ import click
 from ...processing.processor import VESProcessor
 from ..formatters.table import TableFormatter
 from ..formatters.json import JSONFormatter
+from ..formatters.csv import CSVFormatter
 
 
 @click.command()
 @click.argument('cve_id')
-@click.option('--format', type=click.Choice(['json', 'table']), default='table', help='Output format')
+@click.option('--format', type=click.Choice(['json', 'table', 'csv']), default='table', help='Output format')
 @click.option('--output', '-o', help='Output file path')
 @click.option('--timeout', default=180, help='Timeout in seconds (default: 180)')
 @click.option('--debug', is_flag=True, help='Enable debug logging for this command')
@@ -27,6 +28,7 @@ def scan(ctx, cve_id, format, output, timeout, debug, skip_lev, fast, lev_timeou
         ves scan CVE-2021-44228                    # Full analysis with LEV
         ves scan CVE-2021-44228 --fast             # Quick analysis, skips LEV  
         ves scan CVE-2021-44228 --skip-lev         # Skip only LEV calculation
+        ves scan CVE-2021-44228 --format csv       # CSV output format
         ves scan CVE-2021-44228 --debug            # Enable debug logging
         ves scan CVE-2021-44228 --lev-timeout 15   # Shorter LEV timeout
         ves scan CVE-2021-44228 --timeout 60       # Overall timeout
@@ -105,6 +107,15 @@ def scan(ctx, cve_id, format, output, timeout, debug, skip_lev, fast, lev_timeou
                 # Format output
                 if format == 'json':
                     output_text = JSONFormatter.format_single(result)
+                elif format == 'csv':
+                    # For CSV, create headers and single row
+                    import io
+                    import csv
+                    output_buffer = io.StringIO()
+                    writer = csv.writer(output_buffer)
+                    writer.writerow(CSVFormatter.get_headers())
+                    writer.writerow(CSVFormatter.format_row(result))
+                    output_text = output_buffer.getvalue().strip()
                 else:
                     output_text = TableFormatter.format_single(result)
                 
@@ -114,16 +125,20 @@ def scan(ctx, cve_id, format, output, timeout, debug, skip_lev, fast, lev_timeou
                         f.write(output_text)
                     click.echo(f"Results saved to {output}")
                 else:
-                    click.echo("\n" + "="*60)
-                    if skip_lev:
-                        click.echo("VES ANALYSIS RESULTS (LEV DISABLED)")
+                    if format == 'csv':
+                        click.echo(output_text)
                     else:
-                        click.echo("VES ANALYSIS RESULTS")
-                    click.echo("="*60)
-                    click.echo(output_text)
+                        click.echo("\n" + "="*60)
+                        if skip_lev:
+                            click.echo("VES ANALYSIS RESULTS (LEV DISABLED)")
+                        else:
+                            click.echo("VES ANALYSIS RESULTS")
+                        click.echo("="*60)
+                        click.echo(output_text)
                 
-                # Enhanced summary
-                _display_clean_summary(result, skip_lev, fast)
+                # Enhanced summary (skip for CSV format to keep it clean)
+                if format != 'csv':
+                    _display_clean_summary(result, skip_lev, fast)
                 
         except Exception as e:
             click.echo(f"\nError: {e}")

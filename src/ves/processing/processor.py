@@ -1,4 +1,4 @@
-"""Updated VES Processor using the proper NIST LEV calculator"""
+"""Updated VES Processor"""
 
 import asyncio
 import logging
@@ -17,7 +17,7 @@ from ..scoring.ves_scorer import VESScorer
 
 
 class VESProcessor:
-    """Clean VES Processing Engine with emoji-free logging"""
+    """VES Processing Engine"""
     
     def __init__(self, config: VESConfig):
         self.config = config

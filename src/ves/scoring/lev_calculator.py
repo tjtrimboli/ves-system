@@ -17,7 +17,7 @@ WINDOW_DAYS = 30  # NIST LEV uses 30-day windows
 
 
 class LEVCalculator:
-    """Clean NIST LEV calculator with emoji-free logging"""
+    """NIST-based LEV calculator"""
     
     def __init__(self, session: ClientSession, config: VESConfig):
         self.session = session

@@ -1,4 +1,4 @@
-"""NVD API Client with improved error handling and timeouts"""
+"""NVD API Client"""
 
 import asyncio
 import logging
