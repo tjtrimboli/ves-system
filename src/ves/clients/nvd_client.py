@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from aiohttp import ClientSession, ClientTimeout, ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -11,7 +11,7 @@ from ..config.settings import VESConfig
 
 
 class NVDClient:
-    """NVD API Client with comprehensive error handling"""
+    """NVD API Client with clean logging"""
     
     def __init__(self, session: ClientSession, config: VESConfig):
         self.session = session
@@ -45,9 +45,8 @@ class NVDClient:
         url = f"{self.config.nvd_base_url}?cveId={cve_id}"
         
         try:
-            logging.info(f"🔍 Fetching CVE data for {cve_id} from NVD...")
+            logging.info(f"Fetching CVE data for {cve_id} from NVD...")
             
-            # Use a shorter timeout for individual requests
             timeout = ClientTimeout(total=30, connect=10)
             
             async with self.session.get(url, headers=headers, timeout=timeout) as response:
@@ -58,41 +57,40 @@ class NVDClient:
                     vulnerabilities = data.get('vulnerabilities', [])
                     
                     if vulnerabilities and len(vulnerabilities) > 0:
-                        logging.info(f"✅ Found CVE data for {cve_id}")
+                        logging.info(f"Found CVE data for {cve_id}")
                         return vulnerabilities[0]['cve']
                     else:
-                        logging.warning(f"⚠️  NVD returned empty result for {cve_id}")
+                        logging.warning(f"NVD returned empty result for {cve_id}")
                         return None
                         
                 elif response.status == 404:
-                    logging.warning(f"🔍 CVE {cve_id} not found in NVD (404)")
+                    logging.warning(f"CVE {cve_id} not found in NVD (404)")
                     return None
                     
                 elif response.status == 403:
                     error_text = await response.text()
-                    logging.error(f"❌ NVD API access forbidden (403): {error_text}")
+                    logging.error(f"NVD API access forbidden (403): {error_text}")
                     if "API key" in error_text.lower():
-                        logging.error("💡 Check your NVD API key configuration")
+                        logging.error("Check your NVD API key configuration")
                     raise ClientError(f"NVD API access forbidden: {error_text}")
                     
                 elif response.status == 429:
-                    logging.warning(f"⏰ Rate limited by NVD API - will retry")
-                    # Exponential backoff will handle retry
+                    logging.warning("Rate limited by NVD API - will retry")
                     raise ClientError("Rate limited by NVD API")
                     
                 else:
                     error_text = await response.text()
-                    logging.error(f"❌ NVD API error {response.status}: {error_text}")
+                    logging.error(f"NVD API error {response.status}: {error_text}")
                     response.raise_for_status()
                     
         except asyncio.TimeoutError:
-            logging.error(f"⏰ Timeout fetching CVE data for {cve_id} from NVD")
+            logging.error(f"Timeout fetching CVE data for {cve_id} from NVD")
             raise
         except ClientError as e:
-            logging.error(f"🌐 Network error for {cve_id}: {e}")
+            logging.error(f"Network error for {cve_id}: {e}")
             raise
         except Exception as e:
-            logging.error(f"💥 Unexpected error fetching {cve_id} from NVD: {e}")
+            logging.error(f"Unexpected error fetching {cve_id} from NVD: {e}")
             raise
         
         return None

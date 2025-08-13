@@ -1,5 +1,4 @@
 """Single CVE scan command"""
-"""Enhanced scan command with fixed debug logging and LEV timeout handling"""
 
 import asyncio
 import logging
@@ -22,7 +21,7 @@ from ..formatters.json import JSONFormatter
 @click.option('--lev-timeout', default=30, help='Timeout for LEV calculation only (default: 30)')
 @click.pass_context
 def scan(ctx, cve_id, format, output, timeout, debug, skip_lev, fast, lev_timeout):
-    """Scan a single CVE and calculate VES score with enhanced timeout handling
+    """Scan a single CVE and calculate VES score
     
     Examples:
         ves scan CVE-2021-44228                    # Full analysis with LEV
@@ -37,73 +36,69 @@ def scan(ctx, cve_id, format, output, timeout, debug, skip_lev, fast, lev_timeou
     # Fast mode implies skip LEV and shorter timeouts
     if fast:
         skip_lev = True
-        timeout = min(timeout, 60)  # Max 60 seconds in fast mode
-        lev_timeout = min(lev_timeout, 15)  # Max 15 seconds for LEV in fast mode
-        click.echo("🚀 Fast mode enabled - LEV calculation disabled for speed")
+        timeout = min(timeout, 60)
+        lev_timeout = min(lev_timeout, 15)
+        click.echo("Fast mode enabled - LEV calculation disabled for speed")
     
-    # Force debug logging if requested (fix for .env issue)
+    # Force debug logging if requested
     if debug or config.log_level.upper() == 'DEBUG':
-        # Set up debug logging properly
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.DEBUG)
         
-        # Create a new handler if one doesn't exist
         if not root_logger.handlers:
             handler = logging.StreamHandler(sys.stdout)
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             root_logger.addHandler(handler)
         
-        # Also set all existing handlers to DEBUG
         for handler in root_logger.handlers:
             handler.setLevel(logging.DEBUG)
         
         config.log_level = 'DEBUG'
-        click.echo("🔍 Debug logging enabled")
+        click.echo("Debug logging enabled")
     
     async def process():
         try:
             # Validate CVE format
             if not cve_id.upper().startswith('CVE-'):
-                click.echo(f"⚠️  Warning: '{cve_id}' doesn't follow CVE format (CVE-YYYY-NNNNN)")
+                click.echo(f"Warning: '{cve_id}' doesn't follow CVE format (CVE-YYYY-NNNNN)")
                 click.echo("Proceeding anyway...")
             
             # Show processing info
-            mode_text = "🚀 FAST MODE" if fast else "🔍 FULL ANALYSIS"
+            mode_text = "FAST MODE" if fast else "FULL ANALYSIS"
             if skip_lev and not fast:
                 mode_text += " (LEV disabled)"
             
-            click.echo(f"{mode_text}")
-            click.echo(f"🔍 Processing {cve_id.upper()}...")
-            click.echo(f"⏰ Overall timeout: {timeout} seconds")
+            click.echo(f"VES {mode_text}")
+            click.echo(f"Processing {cve_id.upper()}...")
+            click.echo(f"Timeout: {timeout} seconds")
             
             if skip_lev:
-                click.echo("📊 LEV calculation disabled - using CVSS, EPSS, and KEV only")
+                click.echo("LEV calculation disabled - using CVSS, EPSS, and KEV only")
             else:
-                click.echo(f"📊 Full VES analysis with LEV (LEV timeout: {lev_timeout}s)")
+                click.echo(f"Full VES analysis with LEV (LEV timeout: {lev_timeout}s)")
             
             # Store LEV timeout in config for processor to use
             config.lev_timeout = lev_timeout
             
             async with VESProcessor(config) as processor:
-                # Use asyncio.wait_for to enforce timeout
                 try:
                     result = await asyncio.wait_for(
                         processor.process_single_cve(cve_id.upper(), skip_lev=skip_lev),
                         timeout=timeout
                     )
                 except asyncio.TimeoutError:
-                    click.echo(f"\n⏰ Operation timed out after {timeout} seconds")
-                    click.echo("\n💡 Try these options to resolve the issue:")
-                    click.echo("   🚀 Fast mode: ves scan CVE-2021-44228 --fast")
-                    click.echo("   ⚡ Skip LEV: ves scan CVE-2021-44228 --skip-lev") 
-                    click.echo("   🔧 Shorter LEV timeout: ves scan CVE-2021-44228 --lev-timeout 15")
-                    click.echo("   📊 Debug mode: ves scan CVE-2021-44228 --debug")
-                    click.echo("   🌐 Check network: ping api.first.org")
-                    click.echo(f"   🔍 Verify CVE exists: https://nvd.nist.gov/vuln/detail/{cve_id}")
+                    click.echo(f"\nOperation timed out after {timeout} seconds")
+                    click.echo("\nTry these options to resolve the issue:")
+                    click.echo("  - Fast mode: ves scan CVE-2021-44228 --fast")
+                    click.echo("  - Skip LEV: ves scan CVE-2021-44228 --skip-lev") 
+                    click.echo("  - Shorter LEV timeout: ves scan CVE-2021-44228 --lev-timeout 15")
+                    click.echo("  - Debug mode: ves scan CVE-2021-44228 --debug")
+                    click.echo("  - Check network connectivity")
+                    click.echo(f"  - Verify CVE exists: https://nvd.nist.gov/vuln/detail/{cve_id}")
                     
                     # Run diagnostic
-                    click.echo("\n🔬 Running quick diagnostic...")
+                    click.echo("\nRunning quick diagnostic...")
                     await _run_quick_diagnostic(cve_id)
                     return
                 
@@ -117,28 +112,28 @@ def scan(ctx, cve_id, format, output, timeout, debug, skip_lev, fast, lev_timeou
                 if output:
                     with open(output, 'w') as f:
                         f.write(output_text)
-                    click.echo(f"💾 Results saved to {output}")
+                    click.echo(f"Results saved to {output}")
                 else:
                     click.echo("\n" + "="*60)
                     if skip_lev:
-                        click.echo("🎯 VES ANALYSIS RESULTS (LEV DISABLED)")
+                        click.echo("VES ANALYSIS RESULTS (LEV DISABLED)")
                     else:
-                        click.echo("🎯 VES ANALYSIS RESULTS")
+                        click.echo("VES ANALYSIS RESULTS")
                     click.echo("="*60)
                     click.echo(output_text)
                 
                 # Enhanced summary
-                _display_analysis_summary(result, skip_lev, fast)
+                _display_clean_summary(result, skip_lev, fast)
                 
         except Exception as e:
-            click.echo(f"\n💥 Error: {e}")
+            click.echo(f"\nError: {e}")
             if debug or config.log_level.upper() == 'DEBUG':
                 import traceback
-                click.echo("\n🔍 Debug traceback:")
+                click.echo("\nDebug traceback:")
                 click.echo(traceback.format_exc())
             else:
-                click.echo("\n💡 Use --debug for detailed error information")
-                click.echo("💡 Or try --fast mode for quicker results")
+                click.echo("\nUse --debug for detailed error information")
+                click.echo("Or try --fast mode for quicker results")
     
     asyncio.run(process())
 
@@ -153,135 +148,88 @@ async def _run_quick_diagnostic(cve_id):
             nvd_url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
             try:
                 async with session.get(nvd_url) as response:
-                    click.echo(f"   🟢 NVD API: {response.status} (working)")
+                    click.echo(f"   NVD API: {response.status} (working)")
             except:
-                click.echo(f"   🔴 NVD API: Failed")
+                click.echo(f"   NVD API: Failed")
             
             # Test EPSS current API
             epss_url = f"https://api.first.org/data/v1/epss?cve={cve_id}"
             try:
                 async with session.get(epss_url) as response:
-                    click.echo(f"   🟢 EPSS API: {response.status} (working)")
+                    click.echo(f"   EPSS API: {response.status} (working)")
             except:
-                click.echo(f"   🔴 EPSS API: Failed")
+                click.echo(f"   EPSS API: Failed")
             
-            # Test EPSS time-series API (the problematic one)
+            # Test EPSS time-series API
             time_series_url = f"https://api.first.org/data/v1/epss?cve={cve_id}&scope=time-series"
             try:
                 async with session.get(time_series_url, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                    click.echo(f"   🟢 EPSS Time-series: {response.status} (working)")
+                    click.echo(f"   EPSS Time-series: {response.status} (working)")
             except asyncio.TimeoutError:
-                click.echo(f"   🔴 EPSS Time-series: TIMEOUT (this is the problem!)")
+                click.echo(f"   EPSS Time-series: TIMEOUT (this is the problem)")
             except Exception as e:
-                click.echo(f"   🔴 EPSS Time-series: Failed ({str(e)[:50]})")
+                click.echo(f"   EPSS Time-series: Failed ({str(e)[:50]})")
             
     except Exception:
-        click.echo("   🔴 Diagnostic failed")
+        click.echo("   Diagnostic failed")
     
-    click.echo("\n📋 Quick fix: Use --skip-lev flag to bypass the problematic time-series API")
+    click.echo("\nQuick fix: Use --skip-lev flag to bypass the problematic time-series API")
 
 
-def _display_analysis_summary(result, skip_lev, fast):
-    """Display enhanced analysis summary"""
-    click.echo(f"\n📊 Analysis Summary:")
+def _display_clean_summary(result, skip_lev, fast):
+    """Display clean analysis summary without emojis"""
+    click.echo(f"\nSUMMARY:")
     
     if result.ves_score is not None:
-        click.echo(f"   🎯 VES Score: {result.ves_score:.4f}")
+        click.echo(f"VES Score: {result.ves_score:.4f}")
     else:
-        click.echo(f"   ❌ VES Score: Unable to calculate")
+        click.echo(f"VES Score: Unable to calculate")
     
-    click.echo(f"   📋 Priority Level: {result.priority_level}")
+    priority_text = {1: "IMMEDIATE", 2: "HIGH", 3: "MEDIUM", 4: "LOW"}.get(result.priority_level, "UNKNOWN")
+    click.echo(f"Priority Level: {result.priority_level} ({priority_text})")
     
-    # Priority explanation with better messaging
+    # Priority explanation
     if result.priority_level == 1:
         if result.kev_status:
-            click.echo(f"   🚨 URGENT: Known Exploited Vulnerability in CISA KEV!")
-            click.echo(f"   ⚠️  This vulnerability is being actively exploited!")
+            click.echo(f"URGENT: Known Exploited Vulnerability in CISA KEV")
+            click.echo(f"This vulnerability is being actively exploited")
         else:
-            click.echo(f"   🚨 URGENT: Very High Risk (VES ≥ 0.8)")
-            click.echo(f"   ⚡ Prioritize for immediate patching")
+            click.echo(f"URGENT: Very High Risk (VES >= 0.8)")
+            click.echo(f"Prioritize for immediate patching")
     elif result.priority_level == 2:
-        click.echo(f"   🔥 HIGH: Prioritize for patching within 1 week")
+        click.echo(f"HIGH: Prioritize for patching within 1 week")
     elif result.priority_level == 3:
-        click.echo(f"   🟡 MEDIUM: Include in regular patching cycle")
+        click.echo(f"MEDIUM: Include in regular patching cycle")
     else:
-        click.echo(f"   ✅ LOW: Standard priority")
+        click.echo(f"LOW: Standard priority")
     
-    # Component breakdown
-    click.echo(f"\n🔍 Component Scores:")
-    
-    if result.cvss_score:
-        severity_emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(result.severity.value, "⚪")
-        click.echo(f"   🛡️  CVSS: {result.cvss_score}/10.0 {severity_emoji} {result.severity.value}")
-    else:
-        click.echo(f"   🛡️  CVSS: Not Available")
-    
-    if result.epss_score:
-        if result.epss_percentile and result.epss_percentile >= 95:
-            epss_status = "🔴 TOP 5%"
-        elif result.epss_percentile and result.epss_percentile >= 80:
-            epss_status = "🟠 TOP 20%"
-        elif result.epss_percentile and result.epss_percentile >= 50:
-            epss_status = "🟡 ABOVE AVG"
-        else:
-            epss_status = "🟢 LOWER RISK"
-        
-        click.echo(f"   📈 EPSS: {result.epss_score:.6f} ({result.epss_percentile:.2f}%) {epss_status}")
-    else:
-        click.echo(f"   📈 EPSS: Not Available")
-    
-    if result.lev_score is not None:
-        if result.lev_score >= 0.8:
-            lev_status = "🔴 VERY HIGH"
-        elif result.lev_score >= 0.6:
-            lev_status = "🟠 HIGH"
-        elif result.lev_score >= 0.3:
-            lev_status = "🟡 MEDIUM"
-        else:
-            lev_status = "🟢 LOW"
-        click.echo(f"   📊 LEV:  {result.lev_score:.6f} {lev_status}")
-    elif skip_lev:
-        click.echo(f"   📊 LEV:  Skipped (fast mode)")
-    else:
-        click.echo(f"   📊 LEV:  Unable to calculate")
-    
-    if result.kev_status:
-        click.echo(f"   🚨 KEV:  KNOWN EXPLOITED VULNERABILITY")
-    else:
-        click.echo(f"   ✅ KEV:  Not in KEV catalog")
-    
-    # Performance and next steps
+    # Performance notes
     if skip_lev or fast:
-        click.echo(f"\n💡 Performance Notes:")
+        click.echo(f"\nPerformance Notes:")
         if fast:
-            click.echo(f"   🚀 Fast mode completed quickly without LEV")
+            click.echo(f"Fast mode completed quickly without LEV")
         else:
-            click.echo(f"   ⚡ LEV calculation skipped for speed")
-        click.echo(f"   📊 VES score calculated using CVSS, EPSS, and KEV only")
-        click.echo(f"   🔧 For full analysis including LEV, try without --fast/--skip-lev")
-    else:
-        click.echo(f"\n💡 Next Steps:")
-        click.echo(f"   🚀 For faster scans: use --fast flag")
-        click.echo(f"   📋 For bulk processing: use 'ves bulk' command")
+            click.echo(f"LEV calculation skipped for speed")
+        click.echo(f"VES score calculated using CVSS, EPSS, and KEV only")
         
     if result.priority_level <= 2:
-        click.echo(f"\n⚠️  ACTION REQUIRED: This vulnerability needs attention!")
+        click.echo(f"\nACTION REQUIRED: This vulnerability needs attention")
         if result.kev_status:
-            click.echo(f"   📋 Check CISA KEV for required action timeline")
-        
-    # Recommendations based on scores
-    click.echo(f"\n🎯 Recommendations:")
+            click.echo(f"Check CISA KEV for required action timeline")
+    
+    # Next steps
+    click.echo(f"\nNext Steps:")
     if result.kev_status:
-        click.echo(f"   🚨 IMMEDIATE: Patch this CVE - it's actively exploited!")
+        click.echo(f"IMMEDIATE: Patch this CVE - it's actively exploited")
     elif result.priority_level == 1:
-        click.echo(f"   ⚡ HIGH: Schedule patching within 72 hours")
+        click.echo(f"HIGH: Schedule patching within 72 hours")
     elif result.priority_level == 2:
-        click.echo(f"   🔥 MEDIUM: Schedule patching within 1 week") 
+        click.echo(f"MEDIUM: Schedule patching within 1 week") 
     else:
-        click.echo(f"   📅 STANDARD: Include in regular patching cycle")
+        click.echo(f"STANDARD: Include in regular patching cycle")
     
     if result.epss_score and result.epss_score > 0.7:
-        click.echo(f"   🎯 Monitor threat intelligence - high exploitation probability")
+        click.echo(f"Monitor threat intelligence - high exploitation probability")
     
     if result.cvss_score and result.cvss_score >= 9.0:
-        click.echo(f"   🛡️  Review network segmentation and access controls")
+        click.echo(f"Review network segmentation and access controls")

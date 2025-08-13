@@ -1,4 +1,4 @@
-"""FIRST EPSS API Client with improved error handling"""
+"""FIRST EPSS API Client"""
 
 import asyncio
 import logging
@@ -10,7 +10,7 @@ from ..config.settings import VESConfig
 
 
 class EPSSClient:
-    """EPSS API Client with improved error handling"""
+    """EPSS API Client"""
     
     def __init__(self, session: ClientSession, config: VESConfig):
         self.session = session
@@ -26,7 +26,7 @@ class EPSSClient:
         url = f"{self.config.epss_base_url}?cve={cve_id}"
         
         try:
-            logging.info(f"📊 Fetching EPSS score for {cve_id}...")
+            logging.info(f"Fetching EPSS score for {cve_id}...")
             
             timeout = ClientTimeout(total=20, connect=5)
             
@@ -41,27 +41,27 @@ class EPSSClient:
                         epss_score = float(cve_data.get('epss', 0.0))
                         percentile = float(cve_data.get('percentile', 0.0))
                         
-                        logging.info(f"✅ EPSS score for {cve_id}: {epss_score:.6f} ({percentile:.2f}%)")
+                        logging.info(f"EPSS score for {cve_id}: {epss_score:.6f} ({percentile:.2f}%)")
                         return epss_score, percentile
                     else:
-                        logging.warning(f"⚠️  No EPSS data found for {cve_id}")
+                        logging.warning(f"No EPSS data found for {cve_id}")
                         return None, None
                         
                 elif response.status == 404:
-                    logging.warning(f"🔍 EPSS data not found for {cve_id}")
+                    logging.warning(f"EPSS data not found for {cve_id}")
                     return None, None
                     
                 else:
                     error_text = await response.text()
-                    logging.warning(f"⚠️  EPSS API error {response.status}: {error_text}")
+                    logging.warning(f"EPSS API error {response.status}: {error_text}")
                     return None, None
                     
         except asyncio.TimeoutError:
-            logging.warning(f"⏰ Timeout fetching EPSS data for {cve_id}")
+            logging.warning(f"Timeout fetching EPSS data for {cve_id}")
             return None, None
         except ClientError as e:
-            logging.warning(f"🌐 Network error fetching EPSS for {cve_id}: {e}")
+            logging.warning(f"Network error fetching EPSS for {cve_id}: {e}")
             return None, None
         except Exception as e:
-            logging.warning(f"💥 Error fetching EPSS for {cve_id}: {e}")
+            logging.warning(f"Error fetching EPSS for {cve_id}: {e}")
             return None, None

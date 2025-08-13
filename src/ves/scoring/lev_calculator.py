@@ -17,7 +17,7 @@ WINDOW_DAYS = 30  # NIST LEV uses 30-day windows
 
 
 class LEVCalculator:
-    """Proper NIST LEV calculator using the correct methodology"""
+    """Clean NIST LEV calculator with emoji-free logging"""
     
     def __init__(self, session: ClientSession, config: VESConfig):
         self.session = session
@@ -32,24 +32,24 @@ class LEVCalculator:
         where d_i are 30-day window starts and weight_i handles partial windows
         """
         try:
-            logging.info(f"📊 Starting proper NIST LEV calculation for {cve_id}...")
+            logging.info(f"Starting NIST LEV calculation for {cve_id}...")
             
             # Convert to date objects for calculation
             d0 = self._clamp_date(published_date.date())
             dn = end_date.date()
             
             if dn < d0:
-                logging.warning(f"⚠️  End date ({dn}) is before start date ({d0})")
+                logging.warning(f"End date ({dn}) is before start date ({d0})")
                 return 0.0
             
-            logging.info(f"📅 LEV calculation period:")
+            logging.info(f"LEV calculation period:")
             logging.info(f"   d0 (start): {d0}")
             logging.info(f"   dn (end): {dn}")
             logging.info(f"   Total days: {(dn - d0).days}")
             
             # Generate 30-day window start dates
             window_starts = self._daterange(d0, dn, WINDOW_DAYS)
-            logging.info(f"📊 Processing {len(window_starts)} windows")
+            logging.info(f"Processing {len(window_starts)} windows")
             
             # Fetch EPSS scores for each window start
             epss_by_window = []
@@ -65,7 +65,7 @@ class LEVCalculator:
             return self._compute_lev_from_windows(epss_by_window, dn)
             
         except Exception as e:
-            logging.error(f"💥 LEV calculation failed for {cve_id}: {e}")
+            logging.error(f"LEV calculation failed for {cve_id}: {e}")
             return 0.0
     
     def _clamp_date(self, d: date) -> date:
@@ -100,7 +100,7 @@ class LEVCalculator:
         Apply NIST LEV formula: LEV = 1 - ∏_i (1 - epss_i × weight_i)
         """
         try:
-            logging.info(f"🧮 Applying NIST LEV formula:")
+            logging.info("Applying NIST LEV formula:")
             
             product_term = 1.0
             
@@ -124,7 +124,7 @@ class LEVCalculator:
             lev_score = 1.0 - product_term
             lev_score = max(0.0, min(1.0, lev_score))
             
-            logging.info(f"🎯 NIST LEV Result:")
+            logging.info("NIST LEV Result:")
             logging.info(f"   Final product term: {product_term:.6f}")
             logging.info(f"   LEV = 1 - {product_term:.6f} = {lev_score:.6f}")
             logging.info(f"   LEV percentage: {lev_score * 100:.2f}%")
@@ -132,7 +132,7 @@ class LEVCalculator:
             return lev_score
             
         except Exception as e:
-            logging.error(f"💥 LEV formula computation failed: {e}")
+            logging.error(f"LEV formula computation failed: {e}")
             return 0.0
     
     async def _get_epss_score_on_date(self, cve_id: str, target_date: date) -> float:
@@ -179,48 +179,3 @@ class LEVCalculator:
             await asyncio.sleep(sleep_time)
         
         self.last_request_time = asyncio.get_event_loop().time()
-
-
-# Verification function to test the implementation
-async def verify_lev_calculation():
-    """
-    Verify our implementation with known examples
-    """
-    print("🧮 Verifying LEV calculation implementation...")
-    
-    # Test case: CVE-2025-3102 for 49-day period (Picus example)
-    # April 10, 2025 to May 28, 2025
-    # Expected LEV: ~92.74%
-    
-    start_date = date(2025, 4, 10)
-    end_date = date(2025, 5, 28)
-    
-    print(f"Test case: CVE-2025-3102")
-    print(f"Period: {start_date} to {end_date} ({(end_date - start_date).days} days)")
-    
-    # Simulate the calculation with known EPSS score
-    epss_score = 0.844  # From Picus example
-    
-    # Manual calculation for verification
-    product_term = 1.0
-    
-    # Window 1: April 10 - May 9 (30 days), weight = 1.0
-    window1_term = 1.0 - (epss_score * 1.0)
-    product_term *= window1_term
-    print(f"Window 1: Full window, term = {window1_term:.6f}")
-    
-    # Window 2: May 10 - May 28 (19 days), weight = 19/30 = 0.633
-    window2_weight = 19 / 30.0
-    window2_term = 1.0 - (epss_score * window2_weight)
-    product_term *= window2_term
-    print(f"Window 2: Partial window, weight = {window2_weight:.3f}, term = {window2_term:.6f}")
-    
-    lev_result = 1.0 - product_term
-    print(f"Product term: {product_term:.6f}")
-    print(f"LEV result: {lev_result:.6f} ({lev_result * 100:.2f}%)")
-    print(f"Expected: ~0.9274 (92.74%)")
-    print(f"Match: {'✅' if abs(lev_result - 0.9274) < 0.01 else '❌'}")
-
-
-if __name__ == "__main__":
-    asyncio.run(verify_lev_calculation())
