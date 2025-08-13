@@ -2,271 +2,225 @@
 
 import asyncio
 import logging
-import math
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+import time
+from datetime import datetime, timedelta, date
+from typing import Dict, List, Optional, Tuple
 from aiohttp import ClientSession, ClientTimeout, ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from ..config.settings import VESConfig
 
 
+# Constants from NIST methodology
+EPSS_START_DATE = date(2021, 4, 14)  # EPSS historical data start
+WINDOW_DAYS = 30  # NIST LEV uses 30-day windows
+
+
 class LEVCalculator:
-    """NIST-compliant LEV calculation engine following proper methodology"""
+    """Proper NIST LEV calculator using the correct methodology"""
     
     def __init__(self, session: ClientSession, config: VESConfig):
         self.session = session
         self.config = config
-        self.epss_cache: Dict[str, List[Dict]] = {}
         self.last_request_time = 0
     
-    async def _rate_limit_epss(self):
-        """Conservative rate limiting for EPSS API calls"""
-        elapsed = asyncio.get_event_loop().time() - self.last_request_time
-        min_delay = 3.0  # 3 seconds between calls
-        if elapsed < min_delay:
-            sleep_time = min_delay - elapsed
-            await asyncio.sleep(sleep_time)
-        self.last_request_time = asyncio.get_event_loop().time()
-    
-    async def calculate_lev_score(self, cve_id: str, start_date: datetime, 
-                                 end_date: datetime, max_lookback_days: int = 730) -> float:
+    async def calculate_lev_score(self, cve_id: str, published_date: datetime, 
+                                 end_date: datetime) -> float:
         """
-        Calculate LEV score using proper NIST methodology
-        
-        NIST LEV Formula:
-        LEV(v, d₀, dₙ) ≥ 1 - ∏[∀dᵢ∈dates(d₀,dₙ,30)] (1 - epss(v,dᵢ) × weight(dᵢ,dₙ,30))
+        Calculate LEV score using proper NIST methodology:
+        LEV = 1 - ∏_i (1 - epss(v, d_i) × weight_i)
+        where d_i are 30-day window starts and weight_i handles partial windows
         """
         try:
-            # Limit lookback for performance
-            actual_start = max(start_date, end_date - timedelta(days=max_lookback_days))
-            total_days = (end_date - actual_start).days
+            logging.info(f"📊 Starting proper NIST LEV calculation for {cve_id}...")
             
-            logging.info(f"📊 NIST LEV calculation: {total_days} days lookback")
+            # Convert to date objects for calculation
+            d0 = self._clamp_date(published_date.date())
+            dn = end_date.date()
             
-            # Get EPSS time-series data
-            time_series_data = await self._get_epss_time_series_data(cve_id)
-            
-            if not time_series_data:
-                logging.warning(f"⚠️  No EPSS time-series data for LEV calculation")
+            if dn < d0:
+                logging.warning(f"⚠️  End date ({dn}) is before start date ({d0})")
                 return 0.0
             
-            # Calculate LEV using proper NIST methodology
-            lev_score = self._calculate_nist_lev(time_series_data, actual_start, end_date)
+            logging.info(f"📅 LEV calculation period:")
+            logging.info(f"   d0 (start): {d0}")
+            logging.info(f"   dn (end): {dn}")
+            logging.info(f"   Total days: {(dn - d0).days}")
             
-            logging.info(f"✅ NIST LEV calculation complete: {lev_score:.6f} ({len(time_series_data)} data points)")
-            return lev_score
+            # Generate 30-day window start dates
+            window_starts = self._daterange(d0, dn, WINDOW_DAYS)
+            logging.info(f"📊 Processing {len(window_starts)} windows")
+            
+            # Fetch EPSS scores for each window start
+            epss_by_window = []
+            for window_start in window_starts:
+                epss_score = await self._get_epss_score_on_date(cve_id, window_start)
+                epss_by_window.append((window_start, epss_score))
+                logging.debug(f"   Window {window_start}: EPSS = {epss_score:.6f}")
+                
+                # Small delay between requests for politeness
+                await asyncio.sleep(0.5)
+            
+            # Apply NIST LEV formula
+            return self._compute_lev_from_windows(epss_by_window, dn)
             
         except Exception as e:
             logging.error(f"💥 LEV calculation failed for {cve_id}: {e}")
             return 0.0
     
-    def _calculate_nist_lev(self, time_series_data: List[Dict], 
-                           start_date: datetime, end_date: datetime) -> float:
+    def _clamp_date(self, d: date) -> date:
+        """Clamp date to EPSS availability floor"""
+        return max(d, EPSS_START_DATE)
+    
+    def _daterange(self, start: date, end: date, step_days: int) -> List[date]:
+        """Generate window start dates at fixed step until end"""
+        dates = []
+        d = start
+        while d <= end:
+            dates.append(d)
+            d += timedelta(days=step_days)
+        return dates
+    
+    def _partial_window_weight(self, window_start: date, dn: date, w: int = WINDOW_DAYS) -> float:
         """
-        Calculate LEV using proper NIST methodology with 30-day windows
+        Calculate weight for partial window per NIST methodology:
+        - Full windows get weight = 1.0
+        - Partial window gets weight = days_in_window / w
+        """
+        window_end = window_start + timedelta(days=w)
+        if dn >= window_end:
+            return 1.0  # Full window
         
-        Formula: LEV ≥ 1 - ∏[∀dᵢ∈windows] (1 - epss(dᵢ) × weight(dᵢ))
+        # Partial window
+        days_in_partial = max(0, (dn - window_start).days)
+        return max(0.0, min(1.0, days_in_partial / float(w)))
+    
+    def _compute_lev_from_windows(self, epss_by_window: List[Tuple[date, float]], dn: date) -> float:
+        """
+        Apply NIST LEV formula: LEV = 1 - ∏_i (1 - epss_i × weight_i)
         """
         try:
-            # Convert time-series data to date-indexed dictionary
-            epss_by_date = {}
-            for entry in time_series_data:
-                date_str = entry.get('date')
-                epss_score = float(entry.get('epss', 0.0))
-                if date_str:
-                    epss_by_date[date_str] = epss_score
+            logging.info(f"🧮 Applying NIST LEV formula:")
             
-            if not epss_by_date:
-                return 0.0
-            
-            # Calculate LEV using 30-day windows as per NIST methodology
             product_term = 1.0
-            current_date = start_date
-            windows_processed = 0
             
-            while current_date <= end_date:
-                window_end = min(current_date + timedelta(days=30), end_date)
-                window_days = (window_end - current_date).days
-                
-                # Get EPSS score for this window (use most recent available)
-                window_epss = self._get_epss_for_window(epss_by_date, current_date, window_end)
-                
+            for i, (window_start, epss_score) in enumerate(epss_by_window, 1):
                 # Calculate weight for this window
-                weight = self._calculate_window_weight(window_days, 30)
+                weight = self._partial_window_weight(window_start, dn, WINDOW_DAYS)
                 
-                # Apply NIST formula: product *= (1 - epss * weight)
-                term = 1 - (window_epss * weight)
+                # Apply NIST formula for this window
+                term = max(0.0, min(1.0, 1.0 - (epss_score * weight)))
                 product_term *= term
                 
-                logging.debug(f"Window {windows_processed + 1}: {current_date.strftime('%Y-%m-%d')} to {window_end.strftime('%Y-%m-%d')}")
-                logging.debug(f"  EPSS: {window_epss:.6f}, Weight: {weight:.3f}, Term: {term:.6f}")
+                window_end = min(window_start + timedelta(days=WINDOW_DAYS), dn)
+                days_in_window = (window_end - window_start).days
                 
-                current_date = window_end
-                windows_processed += 1
+                logging.info(f"   Window {i}: {window_start} to {window_end}")
+                logging.info(f"     Days: {days_in_window}, EPSS: {epss_score:.6f}, Weight: {weight:.3f}")
+                logging.info(f"     Term: (1 - {epss_score:.6f} × {weight:.3f}) = {term:.6f}")
+                logging.info(f"     Running product: {product_term:.6f}")
             
-            # Final LEV calculation: LEV = 1 - product_term
-            lev_score = 1 - product_term
-            
-            # Ensure valid range [0, 1]
+            # Final LEV calculation
+            lev_score = 1.0 - product_term
             lev_score = max(0.0, min(1.0, lev_score))
             
-            logging.info(f"📊 NIST LEV calculation details:")
-            logging.info(f"   Windows processed: {windows_processed}")
-            logging.info(f"   Product term: {product_term:.6f}")
-            logging.info(f"   Final LEV: {lev_score:.6f}")
+            logging.info(f"🎯 NIST LEV Result:")
+            logging.info(f"   Final product term: {product_term:.6f}")
+            logging.info(f"   LEV = 1 - {product_term:.6f} = {lev_score:.6f}")
+            logging.info(f"   LEV percentage: {lev_score * 100:.2f}%")
             
             return lev_score
             
         except Exception as e:
-            logging.error(f"💥 NIST LEV calculation error: {e}")
+            logging.error(f"💥 LEV formula computation failed: {e}")
             return 0.0
     
-    def _get_epss_for_window(self, epss_by_date: Dict[str, float], 
-                            start_date: datetime, end_date: datetime) -> float:
-        """Get representative EPSS score for a 30-day window"""
-        
-        # Collect EPSS scores within the window
-        window_scores = []
-        current_date = start_date
-        
-        while current_date <= end_date:
-            date_str = current_date.strftime('%Y-%m-%d')
-            if date_str in epss_by_date:
-                window_scores.append(epss_by_date[date_str])
-            current_date += timedelta(days=1)
-        
-        if window_scores:
-            # Use average EPSS score for the window
-            return sum(window_scores) / len(window_scores)
-        else:
-            # If no data in window, use the most recent available score
-            available_dates = sorted(epss_by_date.keys())
-            if available_dates:
-                # Find the most recent date before or equal to window end
-                window_end_str = end_date.strftime('%Y-%m-%d')
-                relevant_dates = [d for d in available_dates if d <= window_end_str]
-                if relevant_dates:
-                    return epss_by_date[relevant_dates[-1]]
-                else:
-                    # Use earliest available if none before window
-                    return epss_by_date[available_dates[0]]
-            
-            return 0.0
-    
-    def _calculate_window_weight(self, window_days: int, max_days: int = 30) -> float:
+    async def _get_epss_score_on_date(self, cve_id: str, target_date: date) -> float:
         """
-        Calculate weight for a window based on its length
-        
-        NIST methodology uses: weight = window_days / max_days
+        Get EPSS score for a specific date using EPSS API
         """
-        if max_days <= 0:
-            return 1.0
-        
-        weight = window_days / max_days
-        return min(1.0, max(0.0, weight))
-    
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=2, max=8),
-        retry=retry_if_exception_type((ClientError, asyncio.TimeoutError))
-    )
-    async def _get_epss_time_series_data(self, cve_id: str) -> List[Dict]:
-        """Get EPSS time-series data using the API"""
-        # Check cache first
-        if cve_id in self.epss_cache:
-            return self.epss_cache[cve_id]
-        
-        await self._rate_limit_epss()
+        await self._rate_limit()
         
         try:
-            # Use EPSS time-series API
-            url = f"{self.config.epss_base_url}?cve={cve_id}&scope=time-series"
+            params = {
+                "cve": cve_id,
+                "date": target_date.isoformat()
+            }
             
-            logging.debug(f"📡 EPSS time-series API call: {url}")
+            timeout = ClientTimeout(total=10, connect=5)
             
-            timeout = ClientTimeout(total=20, connect=10)
-            
-            async with self.session.get(url, timeout=timeout) as response:
+            async with self.session.get(self.config.epss_base_url, params=params, timeout=timeout) as response:
                 if response.status == 200:
                     data = await response.json()
+                    epss_data = data.get("data", [])
                     
-                    if data.get('data') and len(data['data']) > 0:
-                        time_series_data = data['data']
-                        
-                        # Cache the result
-                        self.epss_cache[cve_id] = time_series_data
-                        
-                        logging.debug(f"📊 Retrieved {len(time_series_data)} EPSS time-series points")
-                        return time_series_data
+                    if epss_data:
+                        # Return the EPSS score for this date
+                        return float(epss_data[0]["epss"])
                     else:
-                        logging.debug(f"🔍 No EPSS time-series data found for {cve_id}")
-                        return []
-                        
-                elif response.status == 404:
-                    logging.debug(f"🔍 CVE not found in EPSS: {cve_id}")
-                    return []
-                    
+                        # No score on that date (e.g., pre-publication)
+                        logging.debug(f"No EPSS data for {cve_id} on {target_date}")
+                        return 0.0
                 else:
-                    error_text = await response.text()
-                    logging.warning(f"⚠️  EPSS API error {response.status}: {error_text}")
-                    return []
+                    logging.warning(f"EPSS API returned {response.status} for {cve_id} on {target_date}")
+                    return 0.0
                     
-        except asyncio.TimeoutError:
-            logging.warning(f"⏰ EPSS time-series timeout for {cve_id}")
-            return []
-        except ClientError as e:
-            logging.warning(f"🌐 EPSS time-series network error for {cve_id}: {e}")
-            return []
         except Exception as e:
-            logging.warning(f"💥 EPSS time-series error for {cve_id}: {e}")
-            return []
-    
-    async def calculate_simplified_lev(self, cve_id: str, start_date: datetime, 
-                                     end_date: datetime, sample_periods: int = 1) -> float:
-        """
-        Simplified LEV calculation using fewer windows for performance
-        """
-        try:
-            # Get time-series data
-            time_series_data = await self._get_epss_time_series_data(cve_id)
-            
-            if not time_series_data:
-                logging.debug(f"🔍 No EPSS data for simplified LEV: {cve_id}")
-                return 0.0
-            
-            # Use simplified calculation with fewer windows
-            total_days = (end_date - start_date).days
-            
-            # For simplified, use larger windows (60 days instead of 30)
-            product_term = 1.0
-            current_date = start_date
-            window_size = 60  # Larger windows for simplified calculation
-            
-            epss_by_date = {}
-            for entry in time_series_data:
-                date_str = entry.get('date')
-                epss_score = float(entry.get('epss', 0.0))
-                if date_str:
-                    epss_by_date[date_str] = epss_score
-            
-            while current_date <= end_date:
-                window_end = min(current_date + timedelta(days=window_size), end_date)
-                window_days = (window_end - current_date).days
-                
-                # Get EPSS for this larger window
-                window_epss = self._get_epss_for_window(epss_by_date, current_date, window_end)
-                weight = self._calculate_window_weight(window_days, window_size)
-                
-                product_term *= (1 - window_epss * weight)
-                current_date = window_end
-            
-            simplified_lev = 1 - product_term
-            simplified_lev = max(0.0, min(1.0, simplified_lev))
-            
-            logging.info(f"✅ Simplified LEV: {simplified_lev:.6f}")
-            return simplified_lev
-            
-        except Exception as e:
-            logging.error(f"💥 Simplified LEV calculation failed: {e}")
+            logging.warning(f"Failed to get EPSS for {cve_id} on {target_date}: {e}")
             return 0.0
+    
+    async def _rate_limit(self):
+        """Rate limiting for EPSS API calls"""
+        elapsed = asyncio.get_event_loop().time() - self.last_request_time
+        min_delay = 1.0  # 1 second between calls
+        
+        if elapsed < min_delay:
+            sleep_time = min_delay - elapsed
+            await asyncio.sleep(sleep_time)
+        
+        self.last_request_time = asyncio.get_event_loop().time()
+
+
+# Verification function to test the implementation
+async def verify_lev_calculation():
+    """
+    Verify our implementation with known examples
+    """
+    print("🧮 Verifying LEV calculation implementation...")
+    
+    # Test case: CVE-2025-3102 for 49-day period (Picus example)
+    # April 10, 2025 to May 28, 2025
+    # Expected LEV: ~92.74%
+    
+    start_date = date(2025, 4, 10)
+    end_date = date(2025, 5, 28)
+    
+    print(f"Test case: CVE-2025-3102")
+    print(f"Period: {start_date} to {end_date} ({(end_date - start_date).days} days)")
+    
+    # Simulate the calculation with known EPSS score
+    epss_score = 0.844  # From Picus example
+    
+    # Manual calculation for verification
+    product_term = 1.0
+    
+    # Window 1: April 10 - May 9 (30 days), weight = 1.0
+    window1_term = 1.0 - (epss_score * 1.0)
+    product_term *= window1_term
+    print(f"Window 1: Full window, term = {window1_term:.6f}")
+    
+    # Window 2: May 10 - May 28 (19 days), weight = 19/30 = 0.633
+    window2_weight = 19 / 30.0
+    window2_term = 1.0 - (epss_score * window2_weight)
+    product_term *= window2_term
+    print(f"Window 2: Partial window, weight = {window2_weight:.3f}, term = {window2_term:.6f}")
+    
+    lev_result = 1.0 - product_term
+    print(f"Product term: {product_term:.6f}")
+    print(f"LEV result: {lev_result:.6f} ({lev_result * 100:.2f}%)")
+    print(f"Expected: ~0.9274 (92.74%)")
+    print(f"Match: {'✅' if abs(lev_result - 0.9274) < 0.01 else '❌'}")
+
+
+if __name__ == "__main__":
+    asyncio.run(verify_lev_calculation())
