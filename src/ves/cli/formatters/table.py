@@ -122,10 +122,13 @@ class TableFormatter:
             
             if result.epss_score is not None:
                 details.append(f"EPSS: {result.epss_score:.4f}")
-            
+
+            if result.lev_score is not None:
+                details.append(f"LEV: {result.lev_score:.4f}")
+
             if result.kev_status:
                 details.append("KEV: EXPLOITED")
-            
+
             if result.ves_score is not None:
                 details.append(f"VES: {result.ves_score:.4f}")
             
